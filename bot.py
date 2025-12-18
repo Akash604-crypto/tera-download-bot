@@ -4,6 +4,8 @@ import asyncio
 import re
 from pathlib import Path
 import subprocess
+from playwright.async_api import async_playwright
+import aiohttp
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -53,6 +55,16 @@ def is_admin(uid):
 def is_authorized(uid, db):
     return str(uid) in db["authorized_users"]
 
+def get_cookie_file(url: str):
+    if "1024terabox.com" in url:
+        return "cookies/cookies_1024.txt"
+    if "teraboxurl.com" in url:
+        return "cookies/cookies_teraboxurl.txt"
+    if "terasharefile.com" in url:
+        return "cookies/cookies_terasharefile.txt"
+    return None
+
+
 # ---------------- DOWNLOAD ---------------- #
 
 async def download_terabox(url, progress_cb=None):
@@ -91,6 +103,71 @@ async def download_terabox(url, progress_cb=None):
     cleaned = DOWNLOAD_DIR / f"{clean_filename(file.stem)}{file.suffix}"
     file.rename(cleaned)
     return cleaned
+
+async def download_with_ytdlp(url, progress_cb=None):
+    cookie_file = get_cookie_file(url)
+    if not cookie_file or not os.path.exists(cookie_file):
+        return None
+
+    output_tpl = DOWNLOAD_DIR / "%(title)s.%(ext)s"
+
+    cmd = [
+        "yt-dlp",
+        "--cookies", cookie_file,
+        "--user-agent", "Mozilla/5.0",
+        "--referer", url,
+        "-f", "mp4/best",
+        "--newline",
+        "-o", str(output_tpl),
+        url
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL
+    )
+
+    async for line in proc.stdout:
+        if progress_cb and "%" in line.decode():
+            progress_cb(line.decode().strip())
+
+    await proc.wait()
+
+    files = list(DOWNLOAD_DIR.glob("*"))
+    return files[0] if files else None
+
+async def download_with_playwright(url, save_path):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(url, timeout=60000)
+
+        await page.wait_for_selector("video", timeout=60000)
+        video_url = await page.eval_on_selector("video", "el => el.src")
+        await browser.close()
+
+    if not video_url:
+        return False
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(video_url) as resp:
+            if resp.status != 200:
+                return False
+            with open(save_path, "wb") as f:
+                f.write(await resp.read())
+
+    return True
+
+async def download_terabox(url, progress_cb=None):
+    file = await download_with_ytdlp(url, progress_cb)
+    if file:
+        return file
+
+    fallback = DOWNLOAD_DIR / "fallback.mp4"
+    success = await download_with_playwright(url, fallback)
+    return fallback if success else None
+
 
 # ---------------- QUEUE WORKER ---------------- #
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
