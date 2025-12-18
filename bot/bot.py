@@ -1,207 +1,77 @@
-import os
-import json
-import asyncio
-import aiohttp
+import os, json, asyncio, aiohttp
 from pathlib import Path
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 
-# ================= CONFIG ================= #
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+ADMIN_ID = int(os.environ["ADMIN_CHAT_ID"])
+BACKEND = os.environ["BACKEND_URL"]
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID"))
+DATA = Path("data")
+DL = Path("downloads")
+DATA.mkdir(exist_ok=True)
+DL.mkdir(exist_ok=True)
 
-BACKEND_URL = os.environ.get(
-    "BACKEND_URL",
-    "https://terabox-backend.onrender.com"  # CHANGE IF NEEDED
-)
-
-MAX_WORKERS = 3
-
-DATA_DIR = Path("./data")
-DOWNLOAD_DIR = Path("./downloads")
-
-DATA_DIR.mkdir(exist_ok=True)
-DOWNLOAD_DIR.mkdir(exist_ok=True)
-
-DB_FILE = DATA_DIR / "users.json"
-download_queue = asyncio.Queue()
-
-TERABOX_DOMAINS = (
-    "terabox",
-    "1024terabox",
-    "terasharefile",
-)
-
-# ================= DB ================= #
+DB = DATA / "users.json"
+queue = asyncio.Queue()
 
 def load_db():
-    if DB_FILE.exists():
-        return json.loads(DB_FILE.read_text())
+    if DB.exists():
+        return json.loads(DB.read_text())
     return {"authorized_users": {}}
 
-def save_db(db):
-    DB_FILE.write_text(json.dumps(db, indent=2))
+def is_allowed(uid, db):
+    return uid == ADMIN_ID or str(uid) in db["authorized_users"]
 
-def is_admin(uid: int) -> bool:
-    return uid == ADMIN_ID
+async def backend_download(url):
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1800)) as s:
+        async with s.post(f"{BACKEND}/download", json={"url": url}) as r:
+            if r.status != 200:
+                raise Exception(await r.text())
+            return await r.json()
 
-def is_authorized(uid: int, db: dict) -> bool:
-    return str(uid) in db["authorized_users"]
-
-# ================= BACKEND CALLS ================= #
-
-async def request_backend_download(url: str):
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=1800)
-    ) as session:
-        try:
-            async with session.post(
-                f"{BACKEND_URL}/download",
-                json={"url": url}
-            ) as resp:
-                if resp.status != 200:
-                    raise Exception(await resp.text())
-                return await resp.json()
-        except aiohttp.ClientConnectorError:
-            raise Exception("Backend is offline or sleeping")
-
-async def fetch_file_from_backend(filename: str):
-    file_path = DOWNLOAD_DIR / filename
-
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=1800)
-    ) as session:
-        async with session.get(f"{BACKEND_URL}/file/{filename}") as resp:
-            if resp.status != 200:
-                raise Exception("Failed to fetch file from backend")
-
-            with open(file_path, "wb") as f:
-                while True:
-                    chunk = await resp.content.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-
-    return file_path
-
-# ================= WORKER ================= #
+async def backend_fetch(name):
+    path = DL / name
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"{BACKEND}/file/{name}") as r:
+            if r.status != 200:
+                raise Exception("Fetch failed")
+            with open(path, "wb") as f:
+                async for c in r.content.iter_chunked(1024*1024):
+                    f.write(c)
+    return path
 
 async def worker(app):
     while True:
-        update, url = await download_queue.get()
-        msg = await update.message.reply_text("⏳ Processing download...")
-
+        upd, url = await queue.get()
+        msg = await upd.message.reply_text("⏳ Processing…")
         try:
-            result = await request_backend_download(url)
-
-            filename = result["filename"]
-            size_mb = result["size_mb"]
-
-            await msg.edit_text(
-                f"📥 Downloaded on server ({size_mb} MB)\n📤 Uploading to Telegram..."
-            )
-
-            file_path = await fetch_file_from_backend(filename)
-
-            with open(file_path, "rb") as f:
-                if filename.lower().endswith((".mp4", ".mkv", ".mov")):
-                    await update.message.reply_video(
-                        video=f,
-                        caption=f"✅ {filename}",
-                        supports_streaming=True
-                    )
-                else:
-                    await update.message.reply_document(
-                        document=f,
-                        caption=f"✅ {filename}"
-                    )
-
-            file_path.unlink(missing_ok=True)
+            res = await backend_download(url)
+            file = await backend_fetch(res["filename"])
+            with open(file, "rb") as f:
+                await upd.message.reply_document(f, caption=f"✅ {res['filename']}")
+            file.unlink(missing_ok=True)
             await msg.delete()
-
         except Exception as e:
-            await msg.edit_text(f"❌ Failed:\n{str(e)}")
+            await msg.edit_text(f"❌ {e}")
+        queue.task_done()
 
-        download_queue.task_done()
+async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Send TeraBox link")
 
-# ================= COMMANDS ================= #
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+async def handle(update: Update, _: ContextTypes.DEFAULT_TYPE):
     db = load_db()
-
-    if is_admin(uid):
-        await update.message.reply_text(
-            "👋 Admin Ready\n\n"
-            "Send any TeraBox link to download."
-        )
+    if not is_allowed(update.effective_user.id, db):
         return
+    await queue.put((update, update.message.text.strip()))
 
-    if is_authorized(uid, db):
-        await update.message.reply_text(
-            "👋 Send a TeraBox link to start download."
-        )
-        return
-
-    await update.message.reply_text("⛔ Access denied. Contact admin.")
-
-async def grant_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-
-    if not context.args:
-        await update.message.reply_text("Usage: /grantaccess <user_id>")
-        return
-
-    uid = context.args[0]
-    db = load_db()
-    db["authorized_users"][uid] = {}
-    save_db(db)
-
-    await update.message.reply_text("✅ Access granted")
-
-# ================= MESSAGE HANDLER ================= #
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ""
-
-    if not any(d in text for d in TERABOX_DOMAINS):
-        return
-
-    db = load_db()
-    uid = update.effective_user.id
-
-    if not (is_admin(uid) or is_authorized(uid, db)):
-        return
-
-    await download_queue.put((update, text))
-
-# ================= MAIN ================= #
-
-async def post_init(application):
-    for _ in range(MAX_WORKERS):
-        application.create_task(worker(application))
+async def post_init(app):
+    app.create_task(worker(app))
 
 def main():
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
-
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("grantaccess", grant_access))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("🤖 Bot started")
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     app.run_polling()
 
 if __name__ == "__main__":
