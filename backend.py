@@ -1,6 +1,4 @@
 import os
-import time
-import random
 import subprocess
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
@@ -15,63 +13,76 @@ COOKIE_DIR = BASE_DIR / "cookies"
 
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-COOKIES = list(COOKIE_DIR.glob("*.txt"))
-COOKIE_LAST_USED = {}
-COOLDOWN = 90  # seconds
-
 class DownloadReq(BaseModel):
     url: str
 
-def get_cookie():
-    now = time.time()
-    random.shuffle(COOKIES)
 
-    for c in COOKIES:
-        last = COOKIE_LAST_USED.get(c.name, 0)
-        if now - last > COOLDOWN:
-            COOKIE_LAST_USED[c.name] = now
-            return c
+def get_cookie_for_url(url: str):
+    if "1024terabox.com" in url:
+        return COOKIE_DIR / "cookies_1024.txt"
+    if "teraboxurl.com" in url:
+        return COOKIE_DIR / "cookies_teraboxurl.txt"
+    if "terasharefile.com" in url:
+        return COOKIE_DIR / "cookies_terasharefile.txt"
     return None
+
 
 @app.post("/download")
 def download(req: DownloadReq):
-    cookie = get_cookie()
-    if not cookie:
-        raise HTTPException(429, "All cookies are cooling down")
+    cookie = get_cookie_for_url(req.url)
+    if not cookie or not cookie.exists():
+        raise HTTPException(400, "No valid cookie for this link")
 
     output = DOWNLOAD_DIR / "%(title)s.%(ext)s"
 
     cmd = [
         "yt-dlp",
         "--cookies", str(cookie),
-        "--user-agent", "Mozilla/5.0",
+        "--user-agent", "Mozilla/5.0 (Linux; Android 12)",
+        "--referer", "https://www.terabox.com/",
+        "--no-check-certificate",
+        "--retries", "10",
+        "--fragment-retries", "10",
+        "--extractor-retries", "10",
+        "--socket-timeout", "30",
+        "-f", "bv*+ba/b/best",
         "--merge-output-format", "mp4",
-        "--retries", "5",
-        "--fragment-retries", "5",
         "-o", str(output),
         req.url
     ]
 
-    run = subprocess.run(cmd, capture_output=True)
+    run = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
 
     if run.returncode != 0:
-        raise HTTPException(500, "Download failed")
+        print("yt-dlp STDOUT:\n", run.stdout)
+        print("yt-dlp STDERR:\n", run.stderr)
+        raise HTTPException(500, "yt-dlp failed")
 
-    files = sorted(DOWNLOAD_DIR.glob("*"), key=os.path.getmtime, reverse=True)
+    files = [
+        f for f in DOWNLOAD_DIR.iterdir()
+        if f.is_file() and not f.name.endswith((".part", ".ytdlp"))
+    ]
+
     if not files:
         raise HTTPException(404, "No file created")
 
-    file = files[0]
+    file = max(files, key=lambda f: f.stat().st_mtime)
     size_mb = round(file.stat().st_size / (1024 * 1024), 2)
 
     return {
         "filename": file.name,
         "size_mb": size_mb
     }
+
+
 @app.get("/file/{filename}")
 def get_file(filename: str):
     file_path = DOWNLOAD_DIR / filename
     if not file_path.exists():
         raise HTTPException(404, "File not found")
     return FileResponse(file_path, filename=filename)
-
