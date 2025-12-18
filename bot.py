@@ -93,6 +93,39 @@ async def download_terabox(url, progress_cb=None):
     return cleaned
 
 # ---------------- QUEUE WORKER ---------------- #
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db = load_db()
+
+    if user_id == ADMIN_ID:
+        await update.message.reply_text(
+            "👋 Welcome, Admin!\n\n"
+            "You can manage this Terabox Downloader Bot.\n\n"
+            "Commands:\n"
+            "• /grantaccess <user_id>\n"
+            "• /setchannel <invite_link>\n"
+            "• /setforwarder <channel_id>\n\n"
+            "Send any Terabox link to start downloading."
+        )
+        return
+
+    if str(user_id) in db["authorized_users"]:
+        await update.message.reply_text(
+            "👋 Welcome!\n\n"
+            "You have access to the Terabox Downloader Bot.\n\n"
+            "Setup steps:\n"
+            "1️⃣ /setchannel <source_channel_invite_link>\n"
+            "2️⃣ /setforwarder <forward_channel_id>\n\n"
+            "Then send a Terabox link or post it in your source channel."
+        )
+        return
+
+    await update.message.reply_text(
+        "⛔ Access Denied\n\n"
+        "You don’t have permission to use this bot.\n"
+        "Please contact the admin."
+    )
+
 
 async def worker(app):
     while True:
@@ -175,6 +208,7 @@ async def handle_message(update, context):
         return
 
     await download_queue.put((update, text, db["authorized_users"].get(uid)))
+    
 
 # ---------------- MAIN ---------------- #
 async def post_init(application):
@@ -194,6 +228,8 @@ def main():
     app.add_handler(CommandHandler("setchannel", set_channel))
     app.add_handler(CommandHandler("setforwarder", set_forwarder))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("start", start))
+
 
     print("Bot started")
     app.run_polling()
