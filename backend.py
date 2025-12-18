@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from fastapi.responses import FileResponse
 
 app = FastAPI()
 
@@ -67,3 +68,10 @@ def download(req: DownloadReq):
         "filename": file.name,
         "size_mb": size_mb
     }
+@app.get("/file/{filename}")
+def get_file(filename: str):
+    file_path = DOWNLOAD_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(404, "File not found")
+    return FileResponse(file_path, filename=filename)
+
