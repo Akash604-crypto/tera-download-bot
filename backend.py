@@ -1,37 +1,44 @@
+import os
+import time
+import random
+import subprocess
+from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import subprocess, os, time, random
-from pathlib import Path
 
 app = FastAPI()
 
-DOWNLOAD_DIR = Path("downloads")
-COOKIE_DIR = Path("cookies")
+BASE_DIR = Path(".")
+DOWNLOAD_DIR = BASE_DIR / "downloads"
+COOKIE_DIR = BASE_DIR / "cookies"
 
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-COOKIE_POOL = list(COOKIE_DIR.glob("*.txt"))
+# Load cookies
+COOKIES = list(COOKIE_DIR.glob("*.txt"))
 COOKIE_COOLDOWN = {}
 
-class DownloadRequest(BaseModel):
+COOLDOWN_SECONDS = 90
+
+class DownloadReq(BaseModel):
     url: str
 
-def get_cookie():
+def pick_cookie():
     now = time.time()
-    random.shuffle(COOKIE_POOL)
+    random.shuffle(COOKIES)
 
-    for cookie in COOKIE_POOL:
-        last = COOKIE_COOLDOWN.get(cookie.name, 0)
-        if now - last > 90:  # 90 sec cooldown
-            COOKIE_COOLDOWN[cookie.name] = now
-            return cookie
+    for c in COOKIES:
+        last = COOKIE_COOLDOWN.get(c.name, 0)
+        if now - last >= COOLDOWN_SECONDS:
+            COOKIE_COOLDOWN[c.name] = now
+            return c
     return None
 
 @app.post("/download")
-def download(req: DownloadRequest):
-    cookie = get_cookie()
+def download(req: DownloadReq):
+    cookie = pick_cookie()
     if not cookie:
-        raise HTTPException(429, "All cookies cooling down")
+        raise HTTPException(status_code=429, detail="All cookies cooling down")
 
     output = DOWNLOAD_DIR / "%(title)s.%(ext)s"
 
@@ -40,6 +47,8 @@ def download(req: DownloadRequest):
         "--cookies", str(cookie),
         "--user-agent", "Mozilla/5.0",
         "--merge-output-format", "mp4",
+        "--retries", "5",
+        "--fragment-retries", "5",
         "-o", str(output),
         req.url
     ]
@@ -47,16 +56,16 @@ def download(req: DownloadRequest):
     proc = subprocess.run(cmd, capture_output=True)
 
     if proc.returncode != 0:
-        raise HTTPException(500, "Download failed")
+        raise HTTPException(status_code=500, detail="yt-dlp failed")
 
     files = sorted(DOWNLOAD_DIR.glob("*"), key=os.path.getmtime, reverse=True)
     if not files:
-        raise HTTPException(404, "No file produced")
+        raise HTTPException(status_code=404, detail="No file created")
 
     file = files[0]
-    size_mb = file.stat().st_size / (1024 * 1024)
+    size_mb = round(file.stat().st_size / (1024 * 1024), 2)
 
     return {
-        "file": file.name,
-        "size_mb": round(size_mb, 2)
+        "filename": file.name,
+        "size_mb": size_mb
     }
