@@ -3,9 +3,6 @@ import json
 import asyncio
 import re
 from pathlib import Path
-import subprocess
-from playwright.async_api import async_playwright
-import aiohttp
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -15,13 +12,12 @@ from telegram.ext import (
     filters,
 )
 
-# ---------------- CONFIG ---------------- #
+# ================= CONFIG ================= #
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID"))
 
 MAX_PARALLEL_DOWNLOADS = 3
-PROGRESS_UPDATE_INTERVAL = 3
 
 DATA_DIR = Path("./data")
 DOWNLOAD_DIR = Path("./downloads")
@@ -29,10 +25,9 @@ DATA_DIR.mkdir(exist_ok=True)
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 DB_FILE = DATA_DIR / "users.json"
-
 download_queue = asyncio.Queue()
 
-# ---------------- DB ---------------- #
+# ================= DB ================= #
 
 def load_db():
     if DB_FILE.exists():
@@ -42,7 +37,7 @@ def load_db():
 def save_db(db):
     DB_FILE.write_text(json.dumps(db, indent=2))
 
-# ---------------- HELPERS ---------------- #
+# ================= HELPERS ================= #
 
 def clean_filename(name: str):
     name = re.sub(r"[^\w\s-]", "", name)
@@ -64,47 +59,9 @@ def get_cookie_file(url: str):
         return "cookies/cookies_terasharefile.txt"
     return None
 
-
-# ---------------- DOWNLOAD ---------------- #
+# ================= DOWNLOAD ================= #
 
 async def download_terabox(url, progress_cb=None):
-    output_tpl = DOWNLOAD_DIR / "%(title)s.%(ext)s"
-
-    cmd = [
-        "yt-dlp",
-        "-f", "mp4/best",
-        "--newline",
-        "-o", str(output_tpl),
-        url
-    ]
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL
-    )
-
-    async for line in proc.stdout:
-        if progress_cb:
-            line = line.decode()
-            if "%" in line:
-                progress_cb(line.strip())
-
-    await proc.wait()
-
-    files = sorted(DOWNLOAD_DIR.glob("*"), key=os.path.getmtime, reverse=True)
-    if not files:
-        return None
-
-    file = files[0]
-    if file.suffix.lower() not in [".mp4", ".mkv", ".webm"]:
-        return None
-
-    cleaned = DOWNLOAD_DIR / f"{clean_filename(file.stem)}{file.suffix}"
-    file.rename(cleaned)
-    return cleaned
-
-async def download_with_ytdlp(url, progress_cb=None):
     cookie_file = get_cookie_file(url)
     if not cookie_file or not os.path.exists(cookie_file):
         return None
@@ -114,10 +71,14 @@ async def download_with_ytdlp(url, progress_cb=None):
     cmd = [
         "yt-dlp",
         "--cookies", cookie_file,
-        "--user-agent", "Mozilla/5.0",
-        "--referer", url,
-        "-f", "mp4/best",
-        "--newline",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "--referer", "https://www.terabox.com/",
+        "--no-check-certificate",
+        "--ignore-errors",
+        "--no-warnings",
+        "--retries", "5",
+        "-f", "bestvideo+bestaudio/best",
+        "--merge-output-format", "mp4",
         "-o", str(output_tpl),
         url
     ]
@@ -125,99 +86,41 @@ async def download_with_ytdlp(url, progress_cb=None):
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL
+        stderr=asyncio.subprocess.PIPE
     )
 
     async for line in proc.stdout:
-        if progress_cb and "%" in line.decode():
-            progress_cb(line.decode().strip())
+        if progress_cb and b"%" in line:
+            progress_cb(line.decode(errors="ignore").strip())
 
     await proc.wait()
 
-    files = list(DOWNLOAD_DIR.glob("*"))
-    return files[0] if files else None
+    files = sorted(DOWNLOAD_DIR.glob("*.mp4"), key=os.path.getmtime, reverse=True)
+    if not files:
+        return None
 
-async def download_with_playwright(url, save_path):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        await page.goto(url, timeout=60000)
+    file = files[0]
+    cleaned = DOWNLOAD_DIR / f"{clean_filename(file.stem)}{file.suffix}"
+    if file != cleaned:
+        file.rename(cleaned)
 
-        await page.wait_for_selector("video", timeout=60000)
-        video_url = await page.eval_on_selector("video", "el => el.src")
-        await browser.close()
+    return cleaned
 
-    if not video_url:
-        return False
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(video_url) as resp:
-            if resp.status != 200:
-                return False
-            with open(save_path, "wb") as f:
-                f.write(await resp.read())
-
-    return True
-
-async def download_terabox(url, progress_cb=None):
-    file = await download_with_ytdlp(url, progress_cb)
-    if file:
-        return file
-
-    fallback = DOWNLOAD_DIR / "fallback.mp4"
-    success = await download_with_playwright(url, fallback)
-    return fallback if success else None
-
-
-# ---------------- QUEUE WORKER ---------------- #
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    db = load_db()
-
-    if user_id == ADMIN_ID:
-        await update.message.reply_text(
-            "👋 Welcome, Admin!\n\n"
-            "You can manage this Terabox Downloader Bot.\n\n"
-            "Commands:\n"
-            "• /grantaccess <user_id>\n"
-            "• /setchannel <invite_link>\n"
-            "• /setforwarder <channel_id>\n\n"
-            "Send any Terabox link to start downloading."
-        )
-        return
-
-    if str(user_id) in db["authorized_users"]:
-        await update.message.reply_text(
-            "👋 Welcome!\n\n"
-            "You have access to the Terabox Downloader Bot.\n\n"
-            "Setup steps:\n"
-            "1️⃣ /setchannel <source_channel_invite_link>\n"
-            "2️⃣ /setforwarder <forward_channel_id>\n\n"
-            "Then send a Terabox link or post it in your source channel."
-        )
-        return
-
-    await update.message.reply_text(
-        "⛔ Access Denied\n\n"
-        "You don’t have permission to use this bot.\n"
-        "Please contact the admin."
-    )
-
+# ================= WORKER ================= #
 
 async def worker(app):
     while True:
-        task = await download_queue.get()
-        update, url, user_cfg = task
+        update, url, user_cfg = await download_queue.get()
 
-        msg = await update.message.reply_text("⏳ Downloading… 0%")
+        msg = await update.message.reply_text("⏳ Downloading…")
 
         def progress_cb(text):
-            app.create_task(
-                msg.edit_text(f"⏳ Downloading… {text}")
-            )
+            app.create_task(msg.edit_text(f"⏳ {text}"))
 
-
-        file = await download_terabox(url, progress_cb)
+        try:
+            file = await download_terabox(url, progress_cb)
+        except Exception:
+            file = None
 
         if not file:
             await msg.edit_text("❌ No downloadable video found")
@@ -246,7 +149,36 @@ async def worker(app):
 
         download_queue.task_done()
 
-# ---------------- COMMANDS ---------------- #
+# ================= COMMANDS ================= #
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    db = load_db()
+
+    if uid == ADMIN_ID:
+        await update.message.reply_text(
+            "👋 Welcome, Admin!\n\n"
+            "Commands:\n"
+            "• /grantaccess <user_id>\n"
+            "• /setchannel <invite_link>\n"
+            "• /setforwarder <channel_id>\n\n"
+            "Send any Terabox link to download."
+        )
+        return
+
+    if str(uid) in db["authorized_users"]:
+        await update.message.reply_text(
+            "👋 Welcome!\n\n"
+            "Setup:\n"
+            "1️⃣ /setchannel <invite_link>\n"
+            "2️⃣ /setforwarder <channel_id>\n\n"
+            "Then send Terabox links."
+        )
+        return
+
+    await update.message.reply_text(
+        "⛔ Access denied.\nContact admin."
+    )
 
 async def grant_access(update, context):
     if not is_admin(update.effective_user.id):
@@ -274,7 +206,7 @@ async def set_forwarder(update, context):
     save_db(db)
     await update.message.reply_text("✅ Forwarder set")
 
-# ---------------- MESSAGE HANDLER ---------------- #
+# ================= MESSAGE HANDLER ================= #
 
 TERABOX_DOMAINS = (
     "terabox.com",
@@ -282,39 +214,28 @@ TERABOX_DOMAINS = (
     "teraboxurl.com",
     "terasharefile.com",
     "1024terabox.com",
-    "freeterabox.com",
-    "teraboxlink.com"
 )
 
 async def handle_message(update, context):
-    # Get text safely (ignore non-text messages)
     text = update.message.text or ""
-
-    # Check if message contains any Terabox link
     if not any(domain in text for domain in TERABOX_DOMAINS):
         return
 
-    # Load database
     db = load_db()
-    user_id = update.effective_user.id
-    uid = str(user_id)
+    uid = update.effective_user.id
 
-    # Permission check: Admin OR authorized user
-    if not (is_admin(user_id) or is_authorized(user_id, db)):
+    if not (is_admin(uid) or is_authorized(uid, db)):
         return
 
-    # Push task to download queue
     await download_queue.put(
-        (update, text, db["authorized_users"].get(uid))
+        (update, text, db["authorized_users"].get(str(uid)))
     )
 
-    
+# ================= MAIN ================= #
 
-# ---------------- MAIN ---------------- #
 async def post_init(application):
     for _ in range(MAX_PARALLEL_DOWNLOADS):
         application.create_task(worker(application))
-
 
 def main():
     app = (
@@ -324,17 +245,14 @@ def main():
         .build()
     )
 
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("grantaccess", grant_access))
     app.add_handler(CommandHandler("setchannel", set_channel))
     app.add_handler(CommandHandler("setforwarder", set_forwarder))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CommandHandler("start", start))
-
 
     print("Bot started")
     app.run_polling()
-
-
 
 if __name__ == "__main__":
     main()
