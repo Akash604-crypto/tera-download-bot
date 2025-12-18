@@ -1,7 +1,7 @@
 import os
 import json
 import asyncio
-import re
+import aiohttp
 from pathlib import Path
 from telegram import Update
 from telegram.ext import (
@@ -17,39 +17,25 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID"))
 
-MAX_PARALLEL_DOWNLOADS = 3
+BACKEND_URL = os.environ.get(
+    "BACKEND_URL",
+    "https://terabox-backend.onrender.com"  # CHANGE THIS
+)
 
-BASE_DIR = Path(".")
-DATA_DIR = BASE_DIR / "data"
-DOWNLOAD_DIR = BASE_DIR / "downloads"
-COOKIES_DIR = BASE_DIR / "cookies"
+DATA_DIR = Path("./data")
+DOWNLOAD_DIR = Path("./downloads")
 
 DATA_DIR.mkdir(exist_ok=True)
 DOWNLOAD_DIR.mkdir(exist_ok=True)
-COOKIES_DIR.mkdir(exist_ok=True)
 
 DB_FILE = DATA_DIR / "users.json"
 download_queue = asyncio.Queue()
 
-# ================= COOKIE POOL ================= #
-
-COOKIE_POOL = {
-    "1024terabox.com": [
-        "cookies/cookies_1024.txt",
-    ],
-    "terasharefile.com": [
-        "cookies/cookies_terasharefile.txt",
-    ],
-    "teraboxurl.com": [
-        "cookies/cookies_teraboxurl.txt",
-    ],
-    "terabox.com": [
-        "cookies/cookies_1024.txt",
-        "cookies/cookies_teraboxurl.txt",
-    ],
-}
-
-TERABOX_DOMAINS = tuple(COOKIE_POOL.keys())
+TERABOX_DOMAINS = (
+    "terabox",
+    "1024terabox",
+    "terasharefile",
+)
 
 # ================= DB ================= #
 
@@ -61,124 +47,68 @@ def load_db():
 def save_db(db):
     DB_FILE.write_text(json.dumps(db, indent=2))
 
-# ================= HELPERS ================= #
-
-def clean_filename(name: str) -> str:
-    name = re.sub(r"[^\w\s-]", "", name)
-    name = re.sub(r"\s+", "_", name)
-    return name[:80]
-
-def normalize_terabox_link(url: str) -> str:
-    url = url.strip()
-    url = url.replace("www.", "")
-    url = url.replace("terabox.app", "terabox.com")
-    return url
-
-def is_admin(uid: int) -> bool:
+def is_admin(uid):
     return uid == ADMIN_ID
 
-def is_authorized(uid: int, db: dict) -> bool:
+def is_authorized(uid, db):
     return str(uid) in db["authorized_users"]
 
-def get_cookie_candidates(url: str):
-    for domain, cookies in COOKIE_POOL.items():
-        if domain in url:
-            return cookies
-    return []
+# ================= BACKEND CALL ================= #
 
-# ================= DOWNLOAD CORE ================= #
+async def request_backend_download(url: str):
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1800)) as session:
+        async with session.post(
+            f"{BACKEND_URL}/download",
+            json={"url": url}
+        ) as resp:
+            if resp.status != 200:
+                raise Exception(await resp.text())
+            return await resp.json()
 
-async def download_terabox(url: str, progress_cb=None):
-    url = normalize_terabox_link(url)
-    cookie_files = get_cookie_candidates(url)
+async def fetch_file_from_backend(filename: str):
+    file_path = DOWNLOAD_DIR / filename
 
-    if not cookie_files:
-        return None
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1800)) as session:
+        async with session.get(f"{BACKEND_URL}/file/{filename}") as resp:
+            if resp.status != 200:
+                raise Exception("Failed to fetch file")
 
-    for cookie in cookie_files:
-        if not os.path.exists(cookie):
-            continue
+            with open(file_path, "wb") as f:
+                while True:
+                    chunk = await resp.content.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
 
-        output_tpl = DOWNLOAD_DIR / "%(title)s.%(ext)s"
-
-        cmd = [
-            "yt-dlp",
-            "--cookies", cookie,
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "--referer", "https://www.terabox.com/",
-            "--no-check-certificate",
-            "--ignore-errors",
-            "--retries", "5",
-            "--fragment-retries", "5",
-            "--file-access-retries", "5",
-            "-f", "bestvideo+bestaudio/best",
-            "--merge-output-format", "mp4",
-            "-o", str(output_tpl),
-            url,
-        ]
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        async for line in proc.stdout:
-            if progress_cb and b"%" in line:
-                progress_cb(line.decode(errors="ignore").strip())
-
-        await proc.wait()
-
-        files = sorted(DOWNLOAD_DIR.glob("*.mp4"), key=os.path.getmtime, reverse=True)
-        if files:
-            file = files[0]
-            clean = DOWNLOAD_DIR / f"{clean_filename(file.stem)}{file.suffix}"
-            if file != clean:
-                file.rename(clean)
-            return clean
-
-    return None
+    return file_path
 
 # ================= WORKER ================= #
 
 async def worker(app):
     while True:
-        update, url, user_cfg = await download_queue.get()
-
-        msg = await update.message.reply_text("⏳ Downloading…")
-
-        def progress_cb(text):
-            app.create_task(msg.edit_text(f"⏳ {text}"))
+        update, url = await download_queue.get()
+        msg = await update.message.reply_text("⏳ Processing download...")
 
         try:
-            file = await download_terabox(url, progress_cb)
-        except Exception:
-            file = None
+            result = await request_backend_download(url)
+            filename = result["filename"]
+            size_mb = result["size_mb"]
 
-        if not file:
-            await msg.edit_text("❌ No downloadable video found")
-            download_queue.task_done()
-            continue
+            await msg.edit_text(f"📥 Downloaded on server ({size_mb} MB)\n📤 Sending to Telegram...")
 
-        await msg.edit_text("✅ Download complete")
+            file_path = await fetch_file_from_backend(filename)
 
-        with open(file, "rb") as f:
-            await update.message.reply_video(video=f)
+            with open(file_path, "rb") as f:
+                await update.message.reply_document(
+                    document=f,
+                    caption=f"✅ {filename}"
+                )
 
-        if user_cfg and user_cfg.get("forwarder"):
-            try:
-                with open(file, "rb") as f:
-                    await app.bot.send_video(
-                        chat_id=user_cfg["forwarder"],
-                        video=f
-                    )
-            except:
-                pass
+            file_path.unlink(missing_ok=True)
+            await msg.delete()
 
-        try:
-            file.unlink()
-        except:
-            pass
+        except Exception as e:
+            await msg.edit_text(f"❌ Failed:\n{str(e)}")
 
         download_queue.task_done()
 
@@ -190,58 +120,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if uid == ADMIN_ID:
         await update.message.reply_text(
-            "👋 Welcome, Admin\n\n"
-            "Commands:\n"
-            "• /grantaccess <user_id>\n"
-            "• /setchannel <invite_link>\n"
-            "• /setforwarder <channel_id>\n\n"
-            "Send any Terabox link to download."
+            "👋 Admin Ready\n\nSend any Terabox link."
         )
         return
 
-    if str(uid) in db["authorized_users"]:
-        await update.message.reply_text(
-            "👋 Welcome!\n\n"
-            "Setup:\n"
-            "1️⃣ /setchannel <invite_link>\n"
-            "2️⃣ /setforwarder <channel_id>\n\n"
-            "Then send Terabox links."
-        )
+    if is_authorized(uid, db):
+        await update.message.reply_text("👋 Send Terabox link to download.")
         return
 
-    await update.message.reply_text("⛔ Access denied. Contact admin.")
+    await update.message.reply_text("⛔ Access denied.")
 
 async def grant_access(update, context):
     if not is_admin(update.effective_user.id):
         return
-
     uid = context.args[0]
     db = load_db()
-    db["authorized_users"][uid] = {"channels": [], "forwarder": None}
+    db["authorized_users"][uid] = {}
     save_db(db)
     await update.message.reply_text("✅ Access granted")
-
-async def set_channel(update, context):
-    db = load_db()
-    uid = str(update.effective_user.id)
-    db["authorized_users"].setdefault(uid, {"channels": [], "forwarder": None})
-    db["authorized_users"][uid]["channels"].append(context.args[0])
-    save_db(db)
-    await update.message.reply_text("✅ Channel added")
-
-async def set_forwarder(update, context):
-    db = load_db()
-    uid = str(update.effective_user.id)
-    db["authorized_users"].setdefault(uid, {"channels": [], "forwarder": None})
-    db["authorized_users"][uid]["forwarder"] = int(context.args[0])
-    save_db(db)
-    await update.message.reply_text("✅ Forwarder set")
 
 # ================= MESSAGE HANDLER ================= #
 
 async def handle_message(update, context):
     text = update.message.text or ""
-    if not any(domain in text for domain in TERABOX_DOMAINS):
+    if not any(d in text for d in TERABOX_DOMAINS):
         return
 
     db = load_db()
@@ -250,15 +152,12 @@ async def handle_message(update, context):
     if not (is_admin(uid) or is_authorized(uid, db)):
         return
 
-    await download_queue.put(
-        (update, text, db["authorized_users"].get(str(uid)))
-    )
+    await download_queue.put((update, text))
 
 # ================= MAIN ================= #
 
 async def post_init(application):
-    for _ in range(MAX_PARALLEL_DOWNLOADS):
-        application.create_task(worker(application))
+    application.create_task(worker(application))
 
 def main():
     app = (
@@ -270,8 +169,6 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("grantaccess", grant_access))
-    app.add_handler(CommandHandler("setchannel", set_channel))
-    app.add_handler(CommandHandler("setforwarder", set_forwarder))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("Bot started")
