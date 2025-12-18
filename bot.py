@@ -135,9 +135,10 @@ async def worker(app):
         msg = await update.message.reply_text("⏳ Downloading… 0%")
 
         def progress_cb(text):
-            asyncio.create_task(
+            app.create_task(
                 msg.edit_text(f"⏳ Downloading… {text}")
             )
+
 
         file = await download_terabox(url, progress_cb)
 
@@ -148,14 +149,16 @@ async def worker(app):
 
         await msg.edit_text("✅ Download complete")
 
-        await update.message.reply_video(video=open(file, "rb"))
+        with open(file, "rb") as f:
+            await update.message.reply_video(video=f)
 
         if user_cfg and user_cfg.get("forwarder"):
             try:
-                await app.bot.send_video(
-                    chat_id=user_cfg["forwarder"],
-                    video=open(file, "rb")
-                )
+                with open(file, "rb") as f:
+                    await app.bot.send_video(
+                        chat_id=user_cfg["forwarder"],
+                        video=f
+                    )
             except:
                 pass
 
@@ -196,18 +199,38 @@ async def set_forwarder(update, context):
 
 # ---------------- MESSAGE HANDLER ---------------- #
 
+TERABOX_DOMAINS = (
+    "terabox.com",
+    "teraboxapp.com",
+    "teraboxurl.com",
+    "terasharefile.com",
+    "1024terabox.com",
+    "freeterabox.com",
+    "teraboxlink.com"
+)
+
 async def handle_message(update, context):
+    # Get text safely (ignore non-text messages)
     text = update.message.text or ""
-    if "terasharefile.com" not in text:
+
+    # Check if message contains any Terabox link
+    if not any(domain in text for domain in TERABOX_DOMAINS):
         return
 
+    # Load database
     db = load_db()
-    uid = str(update.effective_user.id)
+    user_id = update.effective_user.id
+    uid = str(user_id)
 
-    if not (is_admin(update.effective_user.id) or is_authorized(update.effective_user.id, db)):
+    # Permission check: Admin OR authorized user
+    if not (is_admin(user_id) or is_authorized(user_id, db)):
         return
 
-    await download_queue.put((update, text, db["authorized_users"].get(uid)))
+    # Push task to download queue
+    await download_queue.put(
+        (update, text, db["authorized_users"].get(uid))
+    )
+
     
 
 # ---------------- MAIN ---------------- #
@@ -238,4 +261,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
