@@ -19,13 +19,37 @@ ADMIN_ID = int(os.environ.get("ADMIN_CHAT_ID"))
 
 MAX_PARALLEL_DOWNLOADS = 3
 
-DATA_DIR = Path("./data")
-DOWNLOAD_DIR = Path("./downloads")
+BASE_DIR = Path(".")
+DATA_DIR = BASE_DIR / "data"
+DOWNLOAD_DIR = BASE_DIR / "downloads"
+COOKIES_DIR = BASE_DIR / "cookies"
+
 DATA_DIR.mkdir(exist_ok=True)
 DOWNLOAD_DIR.mkdir(exist_ok=True)
+COOKIES_DIR.mkdir(exist_ok=True)
 
 DB_FILE = DATA_DIR / "users.json"
 download_queue = asyncio.Queue()
+
+# ================= COOKIE POOL ================= #
+
+COOKIE_POOL = {
+    "1024terabox.com": [
+        "cookies/cookies_1024.txt",
+    ],
+    "terasharefile.com": [
+        "cookies/cookies_terasharefile.txt",
+    ],
+    "teraboxurl.com": [
+        "cookies/cookies_teraboxurl.txt",
+    ],
+    "terabox.com": [
+        "cookies/cookies_1024.txt",
+        "cookies/cookies_teraboxurl.txt",
+    ],
+}
+
+TERABOX_DOMAINS = tuple(COOKIE_POOL.keys())
 
 # ================= DB ================= #
 
@@ -39,72 +63,81 @@ def save_db(db):
 
 # ================= HELPERS ================= #
 
-def clean_filename(name: str):
+def clean_filename(name: str) -> str:
     name = re.sub(r"[^\w\s-]", "", name)
     name = re.sub(r"\s+", "_", name)
-    return name[:60]
+    return name[:80]
 
-def is_admin(uid):
+def normalize_terabox_link(url: str) -> str:
+    url = url.strip()
+    url = url.replace("www.", "")
+    url = url.replace("terabox.app", "terabox.com")
+    return url
+
+def is_admin(uid: int) -> bool:
     return uid == ADMIN_ID
 
-def is_authorized(uid, db):
+def is_authorized(uid: int, db: dict) -> bool:
     return str(uid) in db["authorized_users"]
 
-def get_cookie_file(url: str):
-    if "1024terabox.com" in url:
-        return "cookies/cookies_1024.txt"
-    if "teraboxurl.com" in url:
-        return "cookies/cookies_teraboxurl.txt"
-    if "terasharefile.com" in url:
-        return "cookies/cookies_terasharefile.txt"
+def get_cookie_candidates(url: str):
+    for domain, cookies in COOKIE_POOL.items():
+        if domain in url:
+            return cookies
+    return []
+
+# ================= DOWNLOAD CORE ================= #
+
+async def download_terabox(url: str, progress_cb=None):
+    url = normalize_terabox_link(url)
+    cookie_files = get_cookie_candidates(url)
+
+    if not cookie_files:
+        return None
+
+    for cookie in cookie_files:
+        if not os.path.exists(cookie):
+            continue
+
+        output_tpl = DOWNLOAD_DIR / "%(title)s.%(ext)s"
+
+        cmd = [
+            "yt-dlp",
+            "--cookies", cookie,
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "--referer", "https://www.terabox.com/",
+            "--no-check-certificate",
+            "--ignore-errors",
+            "--retries", "5",
+            "--fragment-retries", "5",
+            "--file-access-retries", "5",
+            "-f", "bestvideo+bestaudio/best",
+            "--merge-output-format", "mp4",
+            "-o", str(output_tpl),
+            url,
+        ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        async for line in proc.stdout:
+            if progress_cb and b"%" in line:
+                progress_cb(line.decode(errors="ignore").strip())
+
+        await proc.wait()
+
+        files = sorted(DOWNLOAD_DIR.glob("*.mp4"), key=os.path.getmtime, reverse=True)
+        if files:
+            file = files[0]
+            clean = DOWNLOAD_DIR / f"{clean_filename(file.stem)}{file.suffix}"
+            if file != clean:
+                file.rename(clean)
+            return clean
+
     return None
-
-# ================= DOWNLOAD ================= #
-
-async def download_terabox(url, progress_cb=None):
-    cookie_file = get_cookie_file(url)
-    if not cookie_file or not os.path.exists(cookie_file):
-        return None
-
-    output_tpl = DOWNLOAD_DIR / "%(title)s.%(ext)s"
-
-    cmd = [
-        "yt-dlp",
-        "--cookies", cookie_file,
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "--referer", "https://www.terabox.com/",
-        "--no-check-certificate",
-        "--ignore-errors",
-        "--no-warnings",
-        "--retries", "5",
-        "-f", "bestvideo+bestaudio/best",
-        "--merge-output-format", "mp4",
-        "-o", str(output_tpl),
-        url
-    ]
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-
-    async for line in proc.stdout:
-        if progress_cb and b"%" in line:
-            progress_cb(line.decode(errors="ignore").strip())
-
-    await proc.wait()
-
-    files = sorted(DOWNLOAD_DIR.glob("*.mp4"), key=os.path.getmtime, reverse=True)
-    if not files:
-        return None
-
-    file = files[0]
-    cleaned = DOWNLOAD_DIR / f"{clean_filename(file.stem)}{file.suffix}"
-    if file != cleaned:
-        file.rename(cleaned)
-
-    return cleaned
 
 # ================= WORKER ================= #
 
@@ -157,7 +190,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if uid == ADMIN_ID:
         await update.message.reply_text(
-            "👋 Welcome, Admin!\n\n"
+            "👋 Welcome, Admin\n\n"
             "Commands:\n"
             "• /grantaccess <user_id>\n"
             "• /setchannel <invite_link>\n"
@@ -176,9 +209,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text(
-        "⛔ Access denied.\nContact admin."
-    )
+    await update.message.reply_text("⛔ Access denied. Contact admin.")
 
 async def grant_access(update, context):
     if not is_admin(update.effective_user.id):
@@ -207,14 +238,6 @@ async def set_forwarder(update, context):
     await update.message.reply_text("✅ Forwarder set")
 
 # ================= MESSAGE HANDLER ================= #
-
-TERABOX_DOMAINS = (
-    "terabox.com",
-    "teraboxapp.com",
-    "teraboxurl.com",
-    "terasharefile.com",
-    "1024terabox.com",
-)
 
 async def handle_message(update, context):
     text = update.message.text or ""
