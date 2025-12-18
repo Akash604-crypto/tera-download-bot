@@ -177,8 +177,7 @@ async def handle_message(update, context):
     await download_queue.put((update, text, db["authorized_users"].get(uid)))
 
 # ---------------- MAIN ---------------- #
-
-async def main():
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("grantaccess", grant_access))
@@ -186,10 +185,15 @@ async def main():
     app.add_handler(CommandHandler("setforwarder", set_forwarder))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # start workers safely
+    loop = asyncio.get_event_loop()
     for _ in range(MAX_PARALLEL_DOWNLOADS):
-        asyncio.create_task(worker(app))
+        loop.create_task(worker(app))
 
-    await app.run_polling()
+    print("Bot started")
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
