@@ -1,12 +1,7 @@
-# Python cache
 __pycache__/
-
-# Environment variables
 .env
 
-# Sensitive cookies
-cookies/*.txt
+downloads/*
+data/*.json
 
-# Runtime folders
-downloads/
-data/
+cookies/*.txt
