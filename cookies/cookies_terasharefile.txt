@@ -1,0 +1,22 @@
+# Netscape HTTP Cookie File
+# http://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file!  Do not edit.
+
+.1024terabox.com	TRUE	/	FALSE	1771259866	browserid	FCRDAagKRYTebBgil8m5uRWLpxkIOOggKRmyF6sbIte2qnfQ3Iy_jTWoXaZdbAn5_4KgF78VKrHSJcZ-
+.1024terabox.com	TRUE	/	FALSE	1768668996	lang	en
+.www.1024terabox.com	TRUE	/	TRUE	1797612996	__stripe_mid	fe9138f6-d78b-4870-b84e-15369f68f11f68d8ca
+.www.1024terabox.com	TRUE	/	TRUE	1766078796	__stripe_sid	d32e7215-2d67-452c-b0ef-48ac427d2bc0024aee
+.1024terabox.com	TRUE	/	TRUE	1797611974	ndus	YyWQzhKteHuic6Yb_Dt4zmmySIr-U-bDVgpdRhET
+.1024terabox.com	TRUE	/	FALSE	1800636997	_ga	GA1.1.842762375.1766075976
+.1024terabox.com	TRUE	/	FALSE	1773851976	_gcl_au	1.1.1618682180.1766075976
+.1024terabox.com	TRUE	/	FALSE	1773852996	_fbp	fb.1.1766075976810.254114577923560164
+.1024terabox.com	TRUE	/	FALSE	1797612914	PANWEB	1
+www.1024terabox.com	FALSE	/	FALSE	1771260915	shareRedirectDomain	terabox.app
+www.1024terabox.com	FALSE	/	FALSE	0	csrfToken	0Q_sjWt19kjhcXiYnB3NalDY
+.1024terabox.com	TRUE	/	FALSE	1766163396	_uetsid	23b78c60dc3011f0b6734f82bbe96bad
+.1024terabox.com	TRUE	/	FALSE	1799772996	_uetvid	23b785d0dc3011f0986401beabd9ed8e
+www.1024terabox.com	FALSE	/	FALSE	1768668996	ndut_fmt	E40367E2410D9335C1033E2AF7BB7DC2A90B8769D96198D97062CF38D0B13048
+.1024terabox.com	TRUE	/	TRUE	1773852996	_rdt_uuid	1766075975995.e4f068db-e1c3-4a2e-b5ca-66fe6b65bc10
+www.1024terabox.com	FALSE	/	FALSE	1781628997	g_state	{"i_l":0,"i_ll":1766076997149,"i_b":"Gxy8CsW+GvPq+p3UmQra8jTjdclkqPotZm3XBfDRlQ0","i_e":{"enable_itp_optimization":0}}
+.1024terabox.com	TRUE	/	FALSE	1800636997	_ga_HSVH9T016H	GS2.1.s1766075976$o1$g1$t1766076997$j60$l0$h0
+www.1024terabox.com	FALSE	/	FALSE	1768668997	ndut_fmv	5bfbaa8d992afb7cdc893d8f90e6d8bf2b2daca5a20d08ccecab10c0f7e887481138b6bfc79d7a3f6ef3a6337eaa804983aff3e6bd307cf90ccc08415e7ed0c3d3201ad4ced45d9004cf9e80fa72a22fc157b904c1aeb94ccfd497f7c885ad3d566a89361dc81096512c311668773c9e
